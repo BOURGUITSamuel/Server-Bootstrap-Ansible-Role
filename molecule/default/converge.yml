@@ -1,0 +1,7 @@
+---
+- name: Appliquer le rôle
+  hosts: all
+  gather_facts: false
+  become: true
+  roles:
+    - role: server_bootstrap

@@ -1,0 +1,129 @@
+---
+driver:
+  name: docker
+
+platforms:
+  - name: debian-trixie
+    image: "${MOLECULE_DEBIAN_IMAGE:-geerlingguy/docker-debian13-ansible:latest}"
+    hostname: debian-node.example.test
+    pre_build_image: true
+    privileged: true
+    command: "/sbin/init"
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    published_ports:
+      - "127.0.0.1:0:22/tcp"
+
+  - name: ubuntu-resolute
+    image: "${MOLECULE_UBUNTU_IMAGE:-geerlingguy/docker-ubuntu2604-ansible:latest}"
+    hostname: ubuntu-node
+    pre_build_image: true
+    privileged: true
+    command: "/sbin/init"
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    published_ports:
+      - "127.0.0.1:0:22/tcp"
+
+provisioner:
+  name: ansible
+  inventory:
+    host_vars:
+      localhost:
+        # Le fichier de test appartient au compte qui exécute Molecule.
+        ansible_become: false
+      debian-trixie:
+        new_hostname: debian-node.example.test
+        controller_hosts_ip: 192.0.2.10
+        molecule_expected_hosts_hostname_line: >-
+          127.0.1.1 debian-node.example.test debian-node
+      ubuntu-resolute:
+        new_hostname: ubuntu-node
+        controller_hosts_ip: 192.0.2.11
+        molecule_expected_hosts_hostname_line: 127.0.1.1 ubuntu-node
+    group_vars:
+      all:
+        molecule_ephemeral_directory: >-
+          {{ lookup('env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}
+        manage_controller_hosts: true
+        controller_hosts_path: "{{ molecule_ephemeral_directory }}/controller-hosts"
+        molecule_controller_hosts_fixture: |
+          127.0.0.1 localhost
+          192.0.2.99 {{ hostvars['debian-trixie'].new_hostname }}
+          192.0.2.200 molecule-unmanaged.example.test
+        molecule_authorized_private_key: >-
+          {{ molecule_ephemeral_directory }}/id_ed25519
+        molecule_secondary_private_key: >-
+          {{ molecule_ephemeral_directory }}/id_ed25519_secondary
+        molecule_unknown_private_key: >-
+          {{ molecule_ephemeral_directory }}/id_ed25519_unknown
+        molecule_ssh_askpass: >-
+          {{ molecule_ephemeral_directory }}/ssh-askpass
+        molecule_admin_user: molecule-admin
+        molecule_unmanaged_admin_user: molecule-unmanaged-admin
+        molecule_password_user: molecule-password
+        molecule_ssh_match_block: |
+          {{ (inventory_hostname == 'debian-trixie') | ternary('match', 'MATCH') }} User molecule-ssh-match
+              PubkeyAuthentication no
+              PasswordAuthentication no
+        user_public_keys:
+          - >-
+            {{
+              lookup(
+                'ansible.builtin.file',
+                molecule_authorized_private_key ~ '.pub'
+              )
+            }}
+          - >-
+            {{
+              lookup(
+                'ansible.builtin.file',
+                molecule_secondary_private_key ~ '.pub'
+              )
+            }}
+        root_public_key: >-
+          {{
+            lookup(
+              'ansible.builtin.file',
+              molecule_authorized_private_key ~ '.pub'
+            )
+          }}
+        controller_ip: 192.0.2.1
+        controller_hostname: ansible-controller
+        deploy_root_nvim_config: true
+        deploy_root_ssh_key: true
+        ssh_permit_root_login: "${MOLECULE_SSH_PERMIT_ROOT_LOGIN:-no}"
+        ssh_password_authentication: ${MOLECULE_SSH_PASSWORD_AUTHENTICATION:-false}
+        ssh_kbd_interactive_authentication: ${MOLECULE_SSH_KBD_INTERACTIVE_AUTHENTICATION:-false}
+        ssh_manage_allowed_users: ${MOLECULE_SSH_MANAGE_ALLOWED_USERS:-false}
+        ssh_allowed_users:
+          - "{{ create_user }}"
+          - root
+          - "{{ molecule_password_user }}"
+        admin_group_nopasswd: ${MOLECULE_ADMIN_GROUP_NOPASSWD:-false}
+        admin_group_members:
+          - "{{ molecule_admin_user }}"
+        admin_group_members_authoritative: ${MOLECULE_ADMIN_GROUP_MEMBERS_AUTHORITATIVE:-true}
+  config_options:
+    defaults:
+      roles_path: ${MOLECULE_PROJECT_DIRECTORY}/../
+    connection:
+      pipelining: true
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - destroy
+    - dependency
+    - syntax
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - verify
+    - destroy

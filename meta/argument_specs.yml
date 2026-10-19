@@ -1,0 +1,136 @@
+---
+argument_specs:
+  main:
+    short_description: Préparer un serveur Linux pour sa gestion avec Ansible
+    description:
+      - Installe les paquets de base et crée le compte technique Ansible.
+      - Configure sudo, les clés publiques, la politique SSH et le nom d'hôte.
+      - Prend en charge Debian 13 et Ubuntu 26.04 uniquement.
+    author:
+      - Technique
+    options:
+      create_user:
+        type: str
+        description:
+          - Compte technique créé et utilisé pour les connexions Ansible.
+          - Ce compte reçoit un accès sudo sans mot de passe.
+
+      manage_hostname:
+        type: bool
+        description:
+          - Active la gestion du nom d'hôte et de la ligne C(127.0.1.1) dans C(/etc/hosts).
+
+      new_hostname:
+        type: str
+        description:
+          - Nom court ou FQDN appliqué à l'hôte lorsque O(manage_hostname=true).
+          - Une valeur non vide et compatible DNS est obligatoire si O(manage_hostname=true) ou O(manage_controller_hosts=true).
+
+      controller_ip:
+        type: str
+        description:
+          - Adresse IPv4 facultative du contrôleur à ajouter dans C(/etc/hosts) de l'hôte distant.
+          - Doit être renseignée avec O(controller_hostname).
+
+      controller_hostname:
+        type: str
+        description:
+          - Nom DNS facultatif du contrôleur à ajouter dans C(/etc/hosts) de l'hôte distant.
+          - Doit être renseigné avec O(controller_ip).
+
+      manage_controller_hosts:
+        type: bool
+        description:
+          - Ajoute ou met à jour l'hôte distant dans le fichier hosts du contrôleur.
+          - La tâche est déléguée à localhost, avec élévation de privilèges et sans sauvegarde.
+
+      controller_hosts_path:
+        type: str
+        description:
+          - Chemin absolu du fichier hosts existant sur le contrôleur Linux.
+          - Vaut C(/etc/hosts) par défaut et permet un fichier temporaire dans les tests.
+
+      controller_hosts_ip:
+        type: str
+        description:
+          - Adresse IPv4 de l'hôte distant à associer à O(new_hostname) sur le contrôleur.
+          - Reprend C(ansible_host) de l'hôte distant, ou son nom d'inventaire, par défaut.
+          - Une adresse explicite est nécessaire si l'inventaire utilise un nom DNS.
+
+      user_public_keys:
+        type: list
+        elements: str
+        description:
+          - Liste exhaustive des clés publiques autorisées pour O(create_user).
+          - Les clés déjà présentes mais absentes de cette liste sont retirées.
+
+      root_public_key:
+        type: str
+        description:
+          - Clé publique unique autorisée pour root lorsque O(deploy_root_ssh_key=true).
+
+      deploy_root_nvim_config:
+        type: bool
+        description:
+          - Déploie la configuration Neovim fournie par le rôle pour root.
+
+      deploy_root_ssh_key:
+        type: bool
+        description:
+          - Gère de manière exhaustive C(/root/.ssh/authorized_keys).
+          - O(root_public_key) doit être non vide lorsque cette option est activée.
+
+      ssh_permit_root_login:
+        type: str
+        choices:
+          - "no"
+          - prohibit-password
+          - "yes"
+        description:
+          - Valeur OpenSSH appliquée à C(PermitRootLogin).
+
+      ssh_password_authentication:
+        type: bool
+        description:
+          - Active ou désactive C(PasswordAuthentication).
+
+      ssh_kbd_interactive_authentication:
+        type: bool
+        description:
+          - Active ou désactive C(KbdInteractiveAuthentication).
+
+      ssh_manage_allowed_users:
+        type: bool
+        description:
+          - Ajoute une directive C(AllowUsers) gérée par le rôle.
+          - La directive n'est pas créée lorsque cette option est désactivée.
+
+      ssh_allowed_users:
+        type: list
+        elements: str
+        description:
+          - Entrées exactes écrites dans C(AllowUsers).
+          - La liste doit contenir O(create_user) lorsque la gestion est activée.
+
+      admin_group_nopasswd:
+        type: bool
+        description:
+          - Autorise les membres du groupe C(admin) à utiliser sudo sans mot de passe.
+
+      admin_group_members:
+        type: list
+        elements: str
+        description:
+          - Comptes Unix existants à ajouter au groupe C(admin).
+
+      admin_group_members_authoritative:
+        type: bool
+        description:
+          - Retire du groupe C(admin) les membres supplémentaires non déclarés.
+          - Le rôle refuse de retirer automatiquement un compte dont C(admin) est le groupe principal.
+
+      sys_packages:
+        type: list
+        elements: str
+        description:
+          - Liste non vide des paquets APT de base à installer.

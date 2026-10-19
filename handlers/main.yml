@@ -1,0 +1,15 @@
+---
+- name: Valider la configuration avant le rechargement de SSH
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/sshd
+      - -t
+      - -f
+      - "{{ ssh_config_path }}"
+  listen: Recharger le service SSH
+  changed_when: false
+
+- name: Recharger le service SSH
+  ansible.builtin.service:
+    name: ssh
+    state: reloaded

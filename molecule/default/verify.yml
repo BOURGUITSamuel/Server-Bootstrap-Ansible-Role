@@ -1,0 +1,758 @@
+---
+- name: Vérifier la préparation et les accès de l'hôte
+  hosts: all
+  gather_facts: false
+
+  # Stabiliser les messages utilisés pour reconnaître les refus d'authentification.
+  environment:
+    LC_ALL: C
+
+  vars_files:
+    - ../../vars/main.yml
+
+  tasks:
+    - name: Lire les valeurs par défaut du rôle pour les vérifications
+      ansible.builtin.include_vars:
+        file: ../../defaults/main.yml
+        name: molecule_role_defaults
+
+    - name: Déterminer le compte et les paquets à vérifier
+      ansible.builtin.set_fact:
+        create_user: "{{ create_user | default(molecule_role_defaults.create_user) }}"
+        sys_packages: "{{ sys_packages | default(molecule_role_defaults.sys_packages) }}"
+
+    - name: Vérifier que l'utilisateur Ansible existe
+      ansible.builtin.command: "id {{ create_user }}"
+      register: user_result
+      changed_when: false
+      failed_when: user_result.rc != 0
+
+    - name: Vérifier les groupes de l'utilisateur Ansible
+      ansible.builtin.command: "id -nG {{ create_user }}"
+      register: user_groups_result
+      changed_when: false
+      failed_when: user_groups_result.rc != 0
+
+    - name: Lire les membres du groupe administrateur
+      ansible.builtin.command:
+        argv:
+          - getent
+          - group
+          - "{{ admin_group }}"
+      register: admin_group_result
+      changed_when: false
+
+    - name: Vérifier l'élévation du compte technique sans mot de passe
+      ansible.builtin.command: sudo -n id -u
+      become: true
+      become_user: "{{ create_user }}"
+      register: sudo_result
+      changed_when: false
+      failed_when: sudo_result.rc != 0
+
+    - name: Vérifier la politique sudo du groupe administrateur
+      ansible.builtin.command: sudo -n id -u
+      become: true
+      become_user: "{{ molecule_admin_user }}"
+      register: admin_sudo_result
+      changed_when: false
+      failed_when: false
+
+    - name: Vérifier l'ensemble de la configuration sudoers
+      ansible.builtin.command: /usr/sbin/visudo -cf /etc/sudoers
+      register: sudoers_result
+      changed_when: false
+      failed_when: sudoers_result.rc != 0
+
+    - name: Vérifier les permissions du fichier sudoers géré
+      ansible.builtin.stat:
+        path: "{{ sudoers_config_path }}"
+      register: sudoers_file
+
+    - name: Vérifier la syntaxe de la configuration SSH
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sshd
+          - -t
+          - -f
+          - "{{ ssh_config_path }}"
+      register: ssh_syntax_result
+      changed_when: false
+      failed_when: ssh_syntax_result.rc != 0
+
+    - name: Lire la configuration SSH principale
+      ansible.builtin.slurp:
+        src: "{{ ssh_config_path }}"
+      register: molecule_ssh_main_config
+
+    - name: Vérifier la préservation du bloc Match et des directives globales
+      ansible.builtin.assert:
+        that:
+          - >-
+            (molecule_ssh_match_block | trim)
+            in (molecule_ssh_main_config.content | b64decode)
+          - >-
+            'PubkeyAuthentication yes'
+            in (
+              molecule_ssh_main_config.content | b64decode
+            ).split(molecule_ssh_match_block.splitlines()[0], 1)[0].splitlines()
+          - >-
+            'PasswordAuthentication '
+            ~ (ssh_password_authentication | ternary('yes', 'no'))
+            in (
+              molecule_ssh_main_config.content | b64decode
+            ).split(molecule_ssh_match_block.splitlines()[0], 1)[0].splitlines()
+        quiet: true
+        fail_msg: >-
+          Le bloc SSH conditionnel a été modifié ou les directives gérées
+          ne sont pas présentes dans la section globale avant ce bloc.
+
+    - name: Lire la configuration SSH effective de l'utilisateur Ansible
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sshd
+          - -T
+          - -C
+          - "user={{ create_user }},host=localhost,addr=127.0.0.1"
+          - -f
+          - "{{ ssh_config_path }}"
+      register: ssh_effective_result
+      changed_when: false
+      failed_when: ssh_effective_result.rc != 0
+
+    - name: Lire la configuration SSH effective de root
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sshd
+          - -T
+          - -C
+          - user=root,host=localhost,addr=127.0.0.1
+          - -f
+          - "{{ ssh_config_path }}"
+      register: ssh_root_effective_result
+      changed_when: false
+      failed_when: ssh_root_effective_result.rc != 0
+
+    - name: Mémoriser les utilisateurs autorisés par la configuration effective
+      ansible.builtin.set_fact:
+        ssh_effective_allowed_users: >-
+          {{
+            (
+              ssh_effective_result.stdout_lines
+              | select('match', '^allowusers ')
+              | map('regex_replace', '^allowusers\s+', '')
+              | join(' ')
+            ).split()
+          }}
+
+    - name: Collecter l'état des services
+      ansible.builtin.service_facts:
+
+    - name: Vérifier que Neovim est installé
+      ansible.builtin.command: nvim --version
+      register: neovim_result
+      changed_when: false
+      failed_when: neovim_result.rc != 0
+
+    - name: Collecter la liste des paquets installés
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Vérifier que les paquets de base sont installés
+      ansible.builtin.assert:
+        that:
+          - item in ansible_facts.packages
+        fail_msg: "Le paquet requis {{ item }} n'est pas installé."
+        quiet: true
+      loop: "{{ sys_packages }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Lire les clés autorisées de l'utilisateur Ansible
+      ansible.builtin.slurp:
+        src: "/home/{{ create_user }}/.ssh/authorized_keys"
+      register: user_authorized_keys
+
+    - name: Vérifier les permissions SSH de l'utilisateur Ansible
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "/home/{{ create_user }}/.ssh"
+        - "/home/{{ create_user }}/.ssh/authorized_keys"
+      register: user_ssh_paths
+
+    - name: Lire la clé autorisée de root
+      ansible.builtin.slurp:
+        src: /root/.ssh/authorized_keys
+      register: root_authorized_keys
+
+    - name: Vérifier les permissions SSH de root
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /root/.ssh
+        - /root/.ssh/authorized_keys
+      register: root_ssh_paths
+
+    - name: Vérifier la configuration Neovim de l'utilisateur Ansible
+      ansible.builtin.stat:
+        path: "{{ nvim_config_path }}"
+      register: user_neovim_config
+
+    - name: Vérifier la configuration Neovim de root
+      ansible.builtin.stat:
+        path: "{{ nvim_config_path_root }}"
+      register: root_neovim_config
+
+    - name: Lire le fichier hosts
+      ansible.builtin.slurp:
+        src: /etc/hosts
+      register: hosts_file
+
+    - name: Lire le fichier hosts temporaire du contrôleur
+      ansible.builtin.slurp:
+        src: "{{ controller_hosts_path }}"
+      delegate_to: localhost
+      become: false
+      register: molecule_controller_hosts_file
+
+    - name: Vérifier l'absence de sauvegarde du fichier hosts du contrôleur
+      ansible.builtin.find:
+        paths: "{{ controller_hosts_path | dirname }}"
+        patterns: "{{ controller_hosts_path | basename }}.*"
+        file_type: file
+      delegate_to: localhost
+      become: false
+      register: molecule_controller_hosts_backups
+
+    - name: Vérifier les entrées du contrôleur et la préservation des autres hôtes
+      ansible.builtin.assert:
+        that:
+          - >-
+            (controller_hosts_ip ~ ' ' ~ new_hostname)
+            in (molecule_controller_hosts_file.content | b64decode).splitlines()
+          - >-
+            (
+              (molecule_controller_hosts_file.content | b64decode).splitlines()
+              | select('match', '(?i)^\s*\S+\s+' ~ (new_hostname | regex_escape) ~ '(?:\s.*)?$')
+              | list
+              | length
+            ) == 1
+          - >-
+            molecule_controller_hosts_fixture.splitlines()[0]
+            in (molecule_controller_hosts_file.content | b64decode).splitlines()
+          - >-
+            molecule_controller_hosts_fixture.splitlines()[-1]
+            in (molecule_controller_hosts_file.content | b64decode).splitlines()
+          - molecule_controller_hosts_backups.matched == 0
+        quiet: true
+        fail_msg: >-
+          Le fichier {{ controller_hosts_path }} doit contenir une seule
+          entrée {{ controller_hosts_ip }} {{ new_hostname }}, préserver
+          les autres hôtes du scénario et ne pas avoir de sauvegarde.
+
+    - name: Lire le nom d'hôte actif
+      ansible.builtin.command: hostname
+      register: active_hostname
+      changed_when: false
+
+    - name: Lire le nom d'hôte persistant
+      ansible.builtin.slurp:
+        src: /etc/hostname
+      register: persistent_hostname
+
+    - name: Rechercher le port SSH publié par Docker
+      ansible.builtin.command:
+        argv:
+          - docker
+          - port
+          - "{{ inventory_hostname }}"
+          - 22/tcp
+      delegate_to: localhost
+      register: docker_ssh_port
+      changed_when: false
+
+    - name: Mémoriser le port SSH publié
+      ansible.builtin.set_fact:
+        molecule_ssh_port: "{{ docker_ssh_port.stdout.rsplit(':', 1)[-1] }}"
+
+    - name: Attendre que le service SSH soit joignable
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ molecule_ssh_port | int }}"
+        timeout: 15
+      delegate_to: localhost
+
+    - name: Tester la connexion SSH et sudo avec la clé principale
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -F
+          - /dev/null
+          - -i
+          - "{{ molecule_authorized_private_key }}"
+          - -p
+          - "{{ molecule_ssh_port }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - IdentitiesOnly=yes
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - UserKnownHostsFile=/dev/null
+          - -o
+          - ConnectTimeout=5
+          - "{{ create_user }}@127.0.0.1"
+          - "whoami && sudo -n id -u"
+      delegate_to: localhost
+      register: ssh_user_login
+      changed_when: false
+      failed_when: ssh_user_login.rc != 0
+
+    - name: Tester la seconde clé déclarée pour l'utilisateur Ansible
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -F
+          - /dev/null
+          - -i
+          - "{{ molecule_secondary_private_key }}"
+          - -p
+          - "{{ molecule_ssh_port }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - IdentitiesOnly=yes
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - UserKnownHostsFile=/dev/null
+          - -o
+          - ConnectTimeout=5
+          - "{{ create_user }}@127.0.0.1"
+          - whoami
+      delegate_to: localhost
+      register: ssh_secondary_user_login
+      changed_when: false
+      failed_when: ssh_secondary_user_login.rc != 0
+
+    - name: Refuser une clé non déclarée pour l'utilisateur Ansible
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -F
+          - /dev/null
+          - -i
+          - "{{ molecule_unknown_private_key }}"
+          - -p
+          - "{{ molecule_ssh_port }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - IdentitiesOnly=yes
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - UserKnownHostsFile=/dev/null
+          - -o
+          - ConnectTimeout=5
+          - "{{ create_user }}@127.0.0.1"
+          - whoami
+      delegate_to: localhost
+      register: ssh_unknown_key_result
+      changed_when: false
+      failed_when: >-
+        ssh_unknown_key_result.rc != 255
+        or 'Permission denied' not in ssh_unknown_key_result.stderr
+
+    - name: Tester la politique de connexion SSH de root
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -F
+          - /dev/null
+          - -i
+          - "{{ molecule_authorized_private_key }}"
+          - -p
+          - "{{ molecule_ssh_port }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - IdentitiesOnly=yes
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - UserKnownHostsFile=/dev/null
+          - -o
+          - ConnectTimeout=5
+          - root@127.0.0.1
+          - whoami
+      delegate_to: localhost
+      register: ssh_root_login
+      changed_when: false
+      failed_when: >-
+        (
+          ssh_permit_root_login == "no"
+          and (
+            ssh_root_login.rc != 255
+            or 'Permission denied' not in ssh_root_login.stderr
+          )
+        )
+        or (
+          ssh_permit_root_login != "no"
+          and ssh_root_login.rc != 0
+        )
+
+    - name: Tester la politique d'authentification par mot de passe
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -F
+          - /dev/null
+          - -p
+          - "{{ molecule_ssh_port }}"
+          - -o
+          - BatchMode=no
+          - -o
+          - PreferredAuthentications=password
+          - -o
+          - PubkeyAuthentication=no
+          - -o
+          - NumberOfPasswordPrompts=1
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - UserKnownHostsFile=/dev/null
+          - -o
+          - ConnectTimeout=5
+          - "{{ molecule_password_user }}@127.0.0.1"
+          - whoami
+      environment:
+        DISPLAY: molecule:0
+        SSH_ASKPASS: "{{ molecule_ssh_askpass }}"
+        SSH_ASKPASS_REQUIRE: force
+      delegate_to: localhost
+      register: ssh_password_login
+      changed_when: false
+      failed_when: >-
+        (
+          ssh_password_authentication
+          and ssh_password_login.rc != 0
+        )
+        or (
+          not ssh_password_authentication
+          and (
+            ssh_password_login.rc != 255
+            or 'Permission denied' not in ssh_password_login.stderr
+          )
+        )
+
+    - name: Tester la politique de connexion root par mot de passe
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -F
+          - /dev/null
+          - -p
+          - "{{ molecule_ssh_port }}"
+          - -o
+          - BatchMode=no
+          - -o
+          - PreferredAuthentications=password
+          - -o
+          - PubkeyAuthentication=no
+          - -o
+          - NumberOfPasswordPrompts=1
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - UserKnownHostsFile=/dev/null
+          - -o
+          - ConnectTimeout=5
+          - root@127.0.0.1
+          - whoami
+      environment:
+        DISPLAY: molecule:0
+        SSH_ASKPASS: "{{ molecule_ssh_askpass }}"
+        SSH_ASKPASS_REQUIRE: force
+      delegate_to: localhost
+      register: ssh_root_password_login
+      changed_when: false
+      failed_when: >-
+        (
+          ssh_permit_root_login == "yes"
+          and ssh_password_authentication
+          and ssh_root_password_login.rc != 0
+        )
+        or (
+          (
+            ssh_permit_root_login != "yes"
+            or not ssh_password_authentication
+          )
+          and (
+            ssh_root_password_login.rc != 255
+            or 'Permission denied' not in ssh_root_password_login.stderr
+          )
+        )
+
+    - name: Vérifier les membres du groupe admin et les accès sudo
+      ansible.builtin.assert:
+        that:
+          - >-
+            (create_user in admin_group_members)
+            == (admin_group in user_groups_result.stdout.split())
+          - molecule_admin_user in admin_group_result.stdout.split(':')[-1].split(',')
+          - >-
+            (
+              admin_group_members_authoritative
+              and molecule_unmanaged_admin_user
+              not in admin_group_result.stdout.split(':')[-1].split(',')
+            )
+            or (
+              not admin_group_members_authoritative
+              and molecule_unmanaged_admin_user
+              in admin_group_result.stdout.split(':')[-1].split(',')
+            )
+          - sudo_result.stdout | trim == "0"
+          - >-
+            (admin_group_nopasswd and admin_sudo_result.rc == 0)
+            or (not admin_group_nopasswd and admin_sudo_result.rc != 0)
+          - sudoers_file.stat.pw_name == "root"
+          - sudoers_file.stat.gr_name == "root"
+          - sudoers_file.stat.mode == "0440"
+        quiet: true
+        fail_msg: >-
+          Les membres du groupe admin, les accès sudo ou les permissions
+          du fichier sudoers géré ne respectent pas la politique demandée.
+
+    - name: Vérifier la politique SSH effective et les connexions réelles
+      ansible.builtin.assert:
+        that:
+          - >-
+            'permitrootlogin ' ~ ssh_permit_root_login
+            in ssh_root_effective_result.stdout_lines
+            or (
+              ssh_permit_root_login == 'prohibit-password'
+              and 'permitrootlogin without-password'
+              in ssh_root_effective_result.stdout_lines
+            )
+          - "'pubkeyauthentication yes' in ssh_effective_result.stdout_lines"
+          - >-
+            'passwordauthentication '
+            ~ (ssh_password_authentication | ternary('yes', 'no'))
+            in ssh_effective_result.stdout_lines
+          - >-
+            'kbdinteractiveauthentication '
+            ~ (ssh_kbd_interactive_authentication | ternary('yes', 'no'))
+            in ssh_effective_result.stdout_lines
+          - "'permitemptypasswords no' in ssh_effective_result.stdout_lines"
+          - >-
+            (
+              ssh_manage_allowed_users
+              and (
+                ssh_allowed_users
+                | difference(ssh_effective_allowed_users)
+                | length == 0
+              )
+              and (
+                ssh_effective_allowed_users
+                | difference(ssh_allowed_users)
+                | length == 0
+              )
+            )
+            or (
+              not ssh_manage_allowed_users
+              and ssh_effective_allowed_users | length == 0
+            )
+          - ansible_facts.services['ssh.service'].state == "running"
+          - ssh_user_login.stdout_lines == [create_user, "0"]
+          - ssh_secondary_user_login.stdout | trim == create_user
+          - >-
+            ssh_permit_root_login == "no"
+            or ssh_root_login.stdout | trim == "root"
+          - >-
+            not ssh_password_authentication
+            or ssh_password_login.stdout | trim == molecule_password_user
+          - >-
+            ssh_permit_root_login != "yes"
+            or not ssh_password_authentication
+            or ssh_root_password_login.stdout | trim == "root"
+        quiet: true
+        fail_msg: >-
+          La politique SSH effective, l'état du service ou l'identité obtenue
+          lors des connexions réelles ne correspond pas à la configuration demandée.
+
+    - name: Vérifier les clés SSH autorisées et leurs permissions
+      ansible.builtin.assert:
+        that:
+          - >-
+            user_public_keys
+            | difference((user_authorized_keys.content | b64decode).splitlines())
+            | length == 0
+          - >-
+            (user_authorized_keys.content | b64decode).splitlines()
+            | difference(user_public_keys)
+            | length == 0
+          - user_ssh_paths.results[0].stat.pw_name == create_user
+          - user_ssh_paths.results[0].stat.mode == "0700"
+          - user_ssh_paths.results[1].stat.pw_name == create_user
+          - user_ssh_paths.results[1].stat.mode == "0600"
+          - >-
+            (root_authorized_keys.content | b64decode).splitlines()
+            == [root_public_key]
+          - root_ssh_paths.results[0].stat.pw_name == "root"
+          - root_ssh_paths.results[0].stat.mode == "0700"
+          - root_ssh_paths.results[1].stat.pw_name == "root"
+          - root_ssh_paths.results[1].stat.mode == "0600"
+        quiet: true
+        fail_msg: >-
+          Les fichiers authorized_keys doivent contenir uniquement les clés
+          déclarées, avec le bon propriétaire et les permissions 0700 pour
+          les répertoires .ssh et 0600 pour les fichiers de clés.
+
+    - name: Vérifier les configurations Neovim déployées
+      ansible.builtin.assert:
+        that:
+          - user_neovim_config.stat.exists
+          - user_neovim_config.stat.mode == "0644"
+          - root_neovim_config.stat.exists
+          - root_neovim_config.stat.mode == "0644"
+        quiet: true
+        fail_msg: >-
+          Les configurations Neovim de l'utilisateur Ansible et de root
+          doivent exister avec les permissions 0644.
+
+    - name: Vérifier le nom d'hôte et les entrées hosts distantes
+      ansible.builtin.assert:
+        that:
+          - active_hostname.stdout | trim == new_hostname
+          - persistent_hostname.content | b64decode | trim == new_hostname
+          - >-
+            molecule_expected_hosts_hostname_line
+            in ((hosts_file.content | b64decode).splitlines())
+          - >-
+            (
+              (hosts_file.content | b64decode).splitlines()
+              | select('match', '^\s*127\.0\.1\.1(?:\s+.*)?$')
+              | list
+              | length
+            ) == 1
+          - >-
+            'ancien-noeud.example.test'
+            not in (hosts_file.content | b64decode)
+          - >-
+            (controller_ip ~ " " ~ controller_hostname)
+            in ((hosts_file.content | b64decode).splitlines())
+        quiet: true
+        fail_msg: >-
+          Le nom d'hôte actif et persistant doit être {{ new_hostname }}.
+          Le fichier /etc/hosts doit contenir une seule ligne 127.0.1.1
+          conforme au scénario et l'entrée du contrôleur demandée.
+
+- name: Vérifier le refus des configurations de nom d'hôte invalides
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Initialiser les résultats des validations négatives
+      ansible.builtin.set_fact:
+        invalid_hostname_rejected: false
+        incomplete_controller_rejected: false
+        invalid_controller_ip_rejected: false
+
+    - name: Préparer un nom d'hôte incompatible avec DNS
+      ansible.builtin.set_fact:
+        new_hostname: ansible_node
+
+    - name: Tester le refus d'un nom d'hôte incompatible avec DNS
+      block:
+        - name: Valider les variables avec un nom d'hôte invalide
+          ansible.builtin.include_role:
+            name: server_bootstrap
+            tasks_from: asserts
+      rescue:
+        - name: Confirmer la cause du refus du nom d'hôte invalide
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == "Vérifier le nom d'hôte demandé"
+            quiet: true
+            fail_msg: >-
+              Le test du nom d'hôte invalide a échoué dans une tâche inattendue :
+              {{ ansible_failed_task.name }}.
+        - name: Mémoriser le refus du nom d'hôte invalide
+          ansible.builtin.set_fact:
+            invalid_hostname_rejected: true
+
+    - name: Préparer une entrée de contrôleur incomplète
+      ansible.builtin.set_fact:
+        new_hostname: molecule-validation.example.test
+        controller_ip: 192.0.2.1
+        controller_hostname: ""
+
+    - name: Tester le refus d'une entrée de contrôleur incomplète
+      block:
+        - name: Valider les variables avec un contrôleur incomplet
+          ansible.builtin.include_role:
+            name: server_bootstrap
+            tasks_from: asserts
+      rescue:
+        - name: Confirmer la cause du refus du contrôleur incomplet
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == "Vérifier les variables de l'entrée optionnelle du contrôleur"
+            quiet: true
+            fail_msg: >-
+              Le test du contrôleur incomplet a échoué dans une tâche inattendue :
+              {{ ansible_failed_task.name }}.
+        - name: Mémoriser le refus du contrôleur incomplet
+          ansible.builtin.set_fact:
+            incomplete_controller_rejected: true
+
+    - name: Préparer une adresse IPv4 invalide
+      ansible.builtin.set_fact:
+        controller_ip: 999.0.2.1
+        controller_hostname: ansible-controller
+
+    - name: Tester le refus d'une adresse IPv4 invalide
+      block:
+        - name: Valider les variables avec une adresse IPv4 invalide
+          ansible.builtin.include_role:
+            name: server_bootstrap
+            tasks_from: asserts
+      rescue:
+        - name: Confirmer la cause du refus de l'adresse IPv4 invalide
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == "Vérifier l'entrée optionnelle du contrôleur"
+            quiet: true
+            fail_msg: >-
+              Le test de l'adresse IPv4 invalide a échoué dans une tâche inattendue :
+              {{ ansible_failed_task.name }}.
+        - name: Mémoriser le refus de l'adresse IPv4 invalide
+          ansible.builtin.set_fact:
+            invalid_controller_ip_rejected: true
+
+    - name: Confirmer les refus attendus
+      ansible.builtin.assert:
+        that:
+          - invalid_hostname_rejected
+          - incomplete_controller_rejected
+          - invalid_controller_ip_rejected
+        quiet: true
+        fail_msg: >-
+          Une configuration de nom d'hôte ou de contrôleur invalide n'a pas
+          été refusée.
+
+    - name: Préparer la désactivation de la gestion du nom d'hôte
+      ansible.builtin.set_fact:
+        manage_hostname: false
+        manage_controller_hosts: false
+        new_hostname: ""
+        controller_ip: ""
+        controller_hostname: ""
+
+    - name: Vérifier que la gestion du nom d'hôte peut être désactivée
+      ansible.builtin.include_role:
+        name: server_bootstrap
+        tasks_from: asserts

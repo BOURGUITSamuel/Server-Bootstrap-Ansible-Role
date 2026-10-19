@@ -1,0 +1,197 @@
+---
+- name: Préparer les identités SSH éphémères du scénario
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Préparer le fichier hosts temporaire du contrôleur
+      ansible.builtin.copy:
+        content: "{{ molecule_controller_hosts_fixture }}"
+        dest: "{{ controller_hosts_path }}"
+        mode: "0600"
+
+    - name: Générer la clé SSH autorisée du scénario
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -q
+          - -t
+          - ed25519
+          - -N
+          - ""
+          - -f
+          - "{{ molecule_ephemeral_directory }}/id_ed25519"
+        creates: "{{ molecule_ephemeral_directory }}/id_ed25519"
+
+    - name: Générer une clé SSH volontairement non autorisée
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -q
+          - -t
+          - ed25519
+          - -N
+          - ""
+          - -f
+          - "{{ molecule_ephemeral_directory }}/id_ed25519_unknown"
+        creates: "{{ molecule_ephemeral_directory }}/id_ed25519_unknown"
+
+    - name: Générer la seconde clé SSH autorisée du scénario
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -q
+          - -t
+          - ed25519
+          - -N
+          - ""
+          - -f
+          - "{{ molecule_ephemeral_directory }}/id_ed25519_secondary"
+        creates: "{{ molecule_ephemeral_directory }}/id_ed25519_secondary"
+
+    - name: Créer l'assistant de mot de passe du test SSH
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          printf '%s\n' 'molecule-test-password'
+        dest: "{{ molecule_ephemeral_directory }}/ssh-askpass"
+        mode: "0700"
+
+- name: Préparer l'hôte de test
+  hosts: all
+  gather_facts: false
+  become: true
+
+  vars_files:
+    - ../../vars/main.yml
+
+  tasks:
+    - name: Installer le serveur OpenSSH requis par le scénario
+      ansible.builtin.apt:
+        name: openssh-server
+        state: present
+        update_cache: true
+
+    - name: Préparer l'absence de la directive SSH globale PubkeyAuthentication
+      ansible.builtin.lineinfile:
+        path: "{{ ssh_config_path }}"
+        regexp: '(?i)^[ \t]*#?[ \t]*PubkeyAuthentication[ \t]+'
+        state: absent
+
+    - name: Préparer le bloc SSH conditionnel à préserver
+      ansible.builtin.blockinfile:
+        path: "{{ ssh_config_path }}"
+        marker: "# {mark} MOLECULE SSH MATCH"
+        block: "{{ molecule_ssh_match_block }}"
+        validate: "/usr/sbin/sshd -t -f %s"
+
+    - name: Créer les administrateurs de test
+      ansible.builtin.user:
+        name: "{{ item }}"
+        state: present
+        create_home: true
+        shell: /bin/bash
+      loop:
+        - "{{ molecule_admin_user }}"
+        - "{{ molecule_unmanaged_admin_user }}"
+
+    - name: Vérifier l'absence du groupe admin avant la simulation
+      ansible.builtin.command:
+        argv:
+          - getent
+          - group
+          - "{{ admin_group }}"
+      register: molecule_admin_group_before_check
+      changed_when: false
+      failed_when: molecule_admin_group_before_check.rc != 2
+
+    - name: Simuler le rôle avant la création du groupe admin
+      ansible.builtin.command:
+        argv:
+          - ansible-playbook
+          - --inventory
+          - "{{ lookup('ansible.builtin.env', 'MOLECULE_INVENTORY_FILE') }}"
+          - "{{ playbook_dir }}/converge.yml"
+          - --check
+          - --limit
+          - "{{ inventory_hostname }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+
+    - name: Vérifier que la simulation n'a pas créé le groupe admin
+      ansible.builtin.command:
+        argv:
+          - getent
+          - group
+          - "{{ admin_group }}"
+      register: molecule_admin_group_after_check
+      changed_when: false
+      failed_when: molecule_admin_group_after_check.rc != 2
+
+    - name: Lire le fichier hosts temporaire après la simulation
+      ansible.builtin.slurp:
+        src: "{{ controller_hosts_path }}"
+      delegate_to: localhost
+      become: false
+      register: molecule_controller_hosts_after_check
+
+    - name: Vérifier que la simulation n'a pas modifié les entrées du contrôleur
+      ansible.builtin.assert:
+        that:
+          - >-
+            (molecule_controller_hosts_after_check.content | b64decode)
+            == molecule_controller_hosts_fixture
+        quiet: true
+
+    - name: Créer le groupe administrateur utilisé par les tests
+      ansible.builtin.group:
+        name: "{{ admin_group }}"
+        state: present
+
+    - name: Ajouter les administrateurs de test au groupe admin
+      ansible.builtin.user:
+        name: "{{ item }}"
+        groups:
+          - "{{ admin_group }}"
+        append: true
+      loop:
+        - "{{ molecule_admin_user }}"
+        - "{{ molecule_unmanaged_admin_user }}"
+
+    - name: Créer le compte du test d'authentification par mot de passe
+      ansible.builtin.user:
+        name: "{{ molecule_password_user }}"
+        state: present
+        password: >-
+          $6$molecule-test$TOKveLbNlEdGSKiHmqAQYoitw0WeaGBjPeeQTdZE3Le72TGkLKuOJxYIBiEFcNc4nw5YtvAs2Sf6ebyJGs3Zq1
+        create_home: true
+        shell: /bin/bash
+
+    - name: Définir le mot de passe root réservé au scénario
+      ansible.builtin.user:
+        name: root
+        password: >-
+          $6$molecule-test$TOKveLbNlEdGSKiHmqAQYoitw0WeaGBjPeeQTdZE3Le72TGkLKuOJxYIBiEFcNc4nw5YtvAs2Sf6ebyJGs3Zq1
+
+    - name: Démarrer le service SSH
+      ansible.builtin.service:
+        name: ssh
+        state: started
+
+    - name: Préparer l'absence de la ligne locale sur Debian
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^\s*127\.0\.1\.1(?:\s+.*)?$'
+        state: absent
+        unsafe_writes: true
+      when: inventory_hostname == "debian-trixie"
+
+    - name: Préparer une ancienne ligne locale sur Ubuntu
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^\s*127\.0\.1\.1(?:\s+.*)?$'
+        line: 127.0.1.1 ancien-noeud.example.test ancien-noeud
+        state: present
+        unsafe_writes: true
+      when: inventory_hostname == "ubuntu-resolute"

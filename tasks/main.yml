@@ -1,0 +1,725 @@
+---
+- name: Préparation d’un serveur pour gestion Ansible
+  block:
+    - name: Préparer l'exécution du rôle
+      ansible.builtin.import_tasks: prerequisites.yml
+      tags:
+        - always
+
+    - name: Valider les entrées du rôle
+      ansible.builtin.import_tasks: asserts.yml
+      tags:
+        - server_bootstrap
+
+    - name: Inspecter les prérequis réellement présents en mode check
+      ansible.builtin.import_tasks: check_mode.yml
+      when: ansible_check_mode
+      tags:
+        - server_bootstrap
+
+    - name: Installer les paquets système de base
+      ansible.builtin.apt:
+        name: "{{ sys_packages }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        force_apt_get: true
+      when: >-
+        not ansible_check_mode
+        or (check_apt_cache_ready | default(false))
+      tags:
+        - server_bootstrap
+        - packages
+
+    - name: S'assurer que le groupe sudo existe
+      ansible.builtin.group:
+        name: "{{ sudo_group }}"
+        state: present
+      tags:
+        - server_bootstrap
+        - sudo
+
+    - name: Créer le groupe admin si nécessaire
+      ansible.builtin.group:
+        name: "{{ admin_group }}"
+        state: present
+      tags:
+        - server_bootstrap
+        - sudo
+
+    - name: Lire la configuration sudoers principale
+      ansible.builtin.slurp:
+        src: /etc/sudoers
+      register: sudoers_main_file
+      when: >-
+        not ansible_check_mode
+        or (check_sudoers_ready | default(false))
+      tags:
+        - server_bootstrap
+        - sudo
+
+    - name: Vérifier la prise en charge du répertoire sudoers.d
+      ansible.builtin.assert:
+        that:
+          - >-
+            (sudoers_main_file.content | b64decode
+            | regex_search('(?m)^[#@]includedir[ \t]+/etc/sudoers\.d[ \t]*$'))
+            is not none
+        quiet: true
+        fail_msg: >-
+          /etc/sudoers n'inclut pas /etc/sudoers.d ; la configuration sudo est
+          interrompue afin de préserver l'accès administrateur.
+      when: >-
+        not ansible_check_mode
+        or (check_sudoers_ready | default(false))
+      tags:
+        - server_bootstrap
+        - sudo
+
+    - name: Configurer les privilèges du compte technique et du groupe admin
+      ansible.builtin.copy:
+        content: |
+          {{ create_user }} ALL=(ALL:ALL) NOPASSWD: ALL
+          %{{ admin_group }} ALL=(ALL:ALL) {{ admin_group_nopasswd | ternary('NOPASSWD: ', '') }}ALL
+        dest: "{{ sudoers_config_path }}"
+        owner: root
+        group: root
+        mode: "0440"
+        backup: true
+        validate: "/usr/sbin/visudo -cf %s"
+      when: >-
+        not ansible_check_mode
+        or (check_sudoers_ready | default(false))
+      tags:
+        - server_bootstrap
+        - sudo
+
+    - name: Créer le compte technique Ansible
+      ansible.builtin.user:
+        name: "{{ create_user }}"
+        state: present
+        create_home: true
+        shell: /bin/bash
+      when: >-
+        not ansible_check_mode
+        or (check_missing_groups | default([]) | length == 0)
+      tags:
+        - server_bootstrap
+        - users
+
+    - name: Vérifier l'existence des administrateurs déclarés
+      ansible.builtin.command:
+        argv:
+          - getent
+          - passwd
+          - "{{ item }}"
+      loop: "{{ admin_group_members }}"
+      loop_control:
+        label: "{{ item }}"
+      register: admin_member_accounts
+      check_mode: false
+      changed_when: false
+      failed_when: false
+      tags:
+        - server_bootstrap
+        - sudo
+        - users
+
+    - name: Refuser les administrateurs déclarés qui n'existent pas
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+        quiet: true
+        fail_msg: >-
+          Le compte {{ item.item }} doit exister avant son ajout au groupe
+          {{ admin_group }}.
+      loop: "{{ admin_member_accounts.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      tags:
+        - server_bootstrap
+        - sudo
+        - users
+
+    - name: Ajouter les administrateurs déclarés au groupe admin
+      ansible.builtin.user:
+        name: "{{ item }}"
+        groups:
+          - "{{ admin_group }}"
+        append: true
+      loop: "{{ admin_group_members }}"
+      loop_control:
+        label: "{{ item }}"
+      when: >-
+        not ansible_check_mode
+        or admin_group not in (check_missing_groups | default([]))
+      tags:
+        - server_bootstrap
+        - sudo
+        - users
+
+    - name: Lire les membres actuels du groupe admin
+      ansible.builtin.command:
+        argv:
+          - getent
+          - group
+          - "{{ admin_group }}"
+      register: admin_group_state
+      check_mode: false
+      changed_when: false
+      when:
+        - admin_group_members_authoritative
+        - >-
+          not ansible_check_mode
+          or admin_group not in (check_missing_groups | default([]))
+      tags:
+        - server_bootstrap
+        - sudo
+        - users
+
+    - name: Lire les comptes et leurs groupes principaux
+      ansible.builtin.command:
+        argv:
+          - getent
+          - passwd
+      register: server_bootstrap_passwd_state
+      check_mode: false
+      changed_when: false
+      when:
+        - admin_group_members_authoritative
+        - >-
+          not ansible_check_mode
+          or admin_group not in (check_missing_groups | default([]))
+      tags:
+        - server_bootstrap
+        - sudo
+        - users
+
+    - name: Mémoriser les membres actuels du groupe admin
+      ansible.builtin.set_fact:
+        server_bootstrap_admin_group_members: >-
+          {{
+            admin_group_state.stdout.split(':')[-1].split(',')
+            | reject('equalto', '')
+            | list
+          }}
+        server_bootstrap_admin_primary_members: >-
+          {{
+            server_bootstrap_passwd_state.stdout_lines
+            | map('split', ':')
+            | selectattr('3', 'equalto', admin_group_state.stdout.split(':')[2])
+            | map(attribute='0')
+            | list
+          }}
+      when:
+        - admin_group_members_authoritative
+        - >-
+          not ansible_check_mode
+          or admin_group not in (check_missing_groups | default([]))
+      tags:
+        - server_bootstrap
+        - sudo
+        - users
+
+    - name: Protéger les administrateurs dont admin est le groupe principal
+      ansible.builtin.assert:
+        that:
+          - >-
+            server_bootstrap_admin_primary_members
+            | difference(admin_group_members)
+            | length == 0
+        quiet: true
+        fail_msg: >-
+          Le mode autoritaire ne peut pas retirer automatiquement un groupe
+          principal. Membres non déclarés concernés :
+          {{ server_bootstrap_admin_primary_members | difference(admin_group_members) | join(', ') }}.
+      when:
+        - admin_group_members_authoritative
+        - >-
+          not ansible_check_mode
+          or admin_group not in (check_missing_groups | default([]))
+      tags:
+        - server_bootstrap
+        - sudo
+        - users
+
+    - name: Retirer les membres non déclarés en mode autoritaire
+      ansible.builtin.command:
+        argv:
+          - gpasswd
+          - --delete
+          - "{{ item }}"
+          - "{{ admin_group }}"
+      loop: >-
+        {{
+          server_bootstrap_admin_group_members
+          | default([])
+          | difference(admin_group_members)
+        }}
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - admin_group_members_authoritative
+        - not ansible_check_mode
+      changed_when: true
+      tags:
+        - server_bootstrap
+        - sudo
+        - users
+
+    - name: Définir la clé autorisée pour l'utilisateur applicatif
+      ansible.posix.authorized_key:
+        user: "{{ create_user }}"
+        state: present
+        key: "{{ user_public_keys | join('\n') }}"
+        manage_dir: true
+        exclusive: true
+      when:
+        - create_user is defined
+        - >-
+          not ansible_check_mode
+          or (check_user_exists | default(false))
+      tags:
+        - server_bootstrap
+        - users
+
+    - name: Définir la clé autorisée pour root
+      ansible.posix.authorized_key:
+        user: root
+        state: present
+        key: "{{ root_public_key }}"
+        manage_dir: true
+        exclusive: true
+      when: deploy_root_ssh_key | bool
+      tags:
+        - server_bootstrap
+        - users
+
+    - name: Lire la configuration SSH principale
+      ansible.builtin.slurp:
+        src: "{{ ssh_config_path }}"
+      register: ssh_main_config
+      tags:
+        - server_bootstrap
+        - ssh
+
+    - name: Préparer la modification de la politique SSH globale
+      ansible.builtin.set_fact:
+        server_bootstrap_ssh_global_config: >-
+          {{
+            ssh_main_config.content
+            | b64decode
+            | regex_replace(
+              '(?ims)^[ \t]*Match[ \t]+.*\Z',
+              ''
+            )
+          }}
+        server_bootstrap_ssh_has_match_block: >-
+          {{
+            (
+              ssh_main_config.content
+              | b64decode
+              | regex_search('(?im)^[ \t]*Match[ \t]+')
+            ) is not none
+          }}
+        server_bootstrap_ssh_managed_directives: >-
+          {{
+            [
+              {
+                'name': 'PermitRootLogin',
+                'line': 'PermitRootLogin ' ~ ssh_permit_root_login
+              },
+              {
+                'name': 'PubkeyAuthentication',
+                'line': 'PubkeyAuthentication yes'
+              },
+              {
+                'name': 'PasswordAuthentication',
+                'line': 'PasswordAuthentication '
+                  ~ (
+                    ssh_password_authentication
+                    | ternary('yes', 'no')
+                  )
+              },
+              {
+                'name': 'KbdInteractiveAuthentication',
+                'line': 'KbdInteractiveAuthentication '
+                  ~ (
+                    ssh_kbd_interactive_authentication
+                    | ternary('yes', 'no')
+                  )
+              },
+              {
+                'name': 'PermitEmptyPasswords',
+                'line': 'PermitEmptyPasswords no'
+              }
+            ]
+            + (
+              [
+                {
+                  'name': 'AllowUsers',
+                  'line': 'AllowUsers ' ~ (ssh_allowed_users | join(' '))
+                }
+              ]
+              if ssh_manage_allowed_users
+              else []
+            )
+          }}
+      tags:
+        - server_bootstrap
+        - ssh
+
+    - name: Refuser les directives SSH globales ambiguës
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              server_bootstrap_ssh_global_config
+              | regex_findall(
+                '(?im)^[ \t]*#?[ \t]*'
+                ~ (item.name | regex_escape)
+                ~ '[ \t]+[^\r\n]*$'
+              )
+              | length
+            ) <= 1
+        quiet: true
+        fail_msg: >-
+          {{ ssh_config_path }} contient plusieurs définitions globales de
+          {{ item.name }}. La configuration SSH n'est pas modifiée afin de ne
+          pas choisir arbitrairement une directive.
+      loop: "{{ server_bootstrap_ssh_managed_directives }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - server_bootstrap
+        - ssh
+
+    - name: Modifier les directives SSH globales avant le premier bloc Match
+      ansible.builtin.replace:
+        path: "{{ ssh_config_path }}"
+        regexp: >-
+          (?im)^[ \t]*#?[ \t]*{{ item.name | regex_escape }}[ \t]+[^\r\n]*$
+        replace: "{{ item.line }}"
+        after: '\A'
+        before: '(?im:^[ \t]*Match[ \t]+)'
+        backup: true
+        validate: "/usr/sbin/sshd -t -f %s"
+      loop: "{{ server_bootstrap_ssh_managed_directives }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - server_bootstrap_ssh_has_match_block
+        - >-
+          server_bootstrap_ssh_global_config
+          | regex_search(
+            '(?im)^[ \t]*#?[ \t]*'
+            ~ (item.name | regex_escape)
+            ~ '[ \t]+[^\r\n]*$'
+          )
+          is not none
+      notify: Recharger le service SSH
+      tags:
+        - server_bootstrap
+        - ssh
+
+    - name: Modifier les directives SSH globales en l'absence de bloc Match
+      ansible.builtin.replace:
+        path: "{{ ssh_config_path }}"
+        regexp: >-
+          (?im)^[ \t]*#?[ \t]*{{ item.name | regex_escape }}[ \t]+[^\r\n]*$
+        replace: "{{ item.line }}"
+        backup: true
+        validate: "/usr/sbin/sshd -t -f %s"
+      loop: "{{ server_bootstrap_ssh_managed_directives }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - not server_bootstrap_ssh_has_match_block
+        - >-
+          server_bootstrap_ssh_global_config
+          | regex_search(
+            '(?im)^[ \t]*#?[ \t]*'
+            ~ (item.name | regex_escape)
+            ~ '[ \t]+[^\r\n]*$'
+          )
+          is not none
+      notify: Recharger le service SSH
+      tags:
+        - server_bootstrap
+        - ssh
+
+    - name: Ajouter les directives SSH globales absentes
+      ansible.builtin.lineinfile:
+        path: "{{ ssh_config_path }}"
+        regexp: '^__server_bootstrap_directive_absente__$'
+        line: "{{ item.line }}"
+        insertbefore: >-
+          {{
+            server_bootstrap_ssh_has_match_block
+            | ternary('(?i)^[ \t]*Match[ \t]+', 'EOF')
+          }}
+        firstmatch: true
+        backup: true
+        validate: "/usr/sbin/sshd -t -f %s"
+      loop: "{{ server_bootstrap_ssh_managed_directives }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: >-
+        server_bootstrap_ssh_global_config
+        | regex_search(
+          '(?im)^[ \t]*#?[ \t]*'
+          ~ (item.name | regex_escape)
+          ~ '[ \t]+[^\r\n]*$'
+        )
+        is none
+      notify: Recharger le service SSH
+      tags:
+        - server_bootstrap
+        - ssh
+
+    - name: Valider l'ensemble de la configuration SSH active
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sshd
+          - -t
+          - -f
+          - "{{ ssh_config_path }}"
+      changed_when: false
+      tags:
+        - server_bootstrap
+        - ssh
+
+    - name: Lire la politique SSH effective du compte technique
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sshd
+          - -T
+          - -C
+          - >-
+            user={{ create_user }},host=localhost,addr=192.0.2.1
+          - -f
+          - "{{ ssh_config_path }}"
+      register: server_bootstrap_ssh_effective_user
+      changed_when: false
+      when: not ansible_check_mode
+      tags:
+        - server_bootstrap
+        - ssh
+
+    - name: Lire la politique SSH effective de root
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sshd
+          - -T
+          - -C
+          - user=root,host=localhost,addr=192.0.2.1
+          - -f
+          - "{{ ssh_config_path }}"
+      register: server_bootstrap_ssh_effective_root
+      changed_when: false
+      when: not ansible_check_mode
+      tags:
+        - server_bootstrap
+        - ssh
+
+    - name: Mémoriser les utilisateurs SSH effectivement autorisés
+      ansible.builtin.set_fact:
+        server_bootstrap_ssh_effective_allowed_users: >-
+          {{
+            (
+              server_bootstrap_ssh_effective_user.stdout_lines
+              | select('match', '^allowusers ')
+              | map('regex_replace', '^allowusers\s+', '')
+              | join(' ')
+            ).split()
+          }}
+      when: not ansible_check_mode
+      tags:
+        - server_bootstrap
+        - ssh
+
+    - name: Vérifier que la politique SSH demandée est effective
+      ansible.builtin.assert:
+        that:
+          - >-
+            'permitrootlogin ' ~ ssh_permit_root_login
+            in server_bootstrap_ssh_effective_root.stdout_lines
+            or (
+              ssh_permit_root_login == 'prohibit-password'
+              and 'permitrootlogin without-password'
+              in server_bootstrap_ssh_effective_root.stdout_lines
+            )
+          - >-
+            'pubkeyauthentication yes'
+            in server_bootstrap_ssh_effective_user.stdout_lines
+          - >-
+            'passwordauthentication '
+            ~ (ssh_password_authentication | ternary('yes', 'no'))
+            in server_bootstrap_ssh_effective_user.stdout_lines
+          - >-
+            'kbdinteractiveauthentication '
+            ~ (
+              ssh_kbd_interactive_authentication
+              | ternary('yes', 'no')
+            )
+            in server_bootstrap_ssh_effective_user.stdout_lines
+          - >-
+            'permitemptypasswords no'
+            in server_bootstrap_ssh_effective_user.stdout_lines
+          - >-
+            not ssh_manage_allowed_users
+            or (
+              ssh_allowed_users
+              | difference(
+                server_bootstrap_ssh_effective_allowed_users
+              )
+              | length == 0
+              and server_bootstrap_ssh_effective_allowed_users
+              | difference(ssh_allowed_users)
+              | length == 0
+            )
+        quiet: true
+        fail_msg: >-
+          La configuration SSH est syntaxiquement valide, mais la politique
+          effective ne correspond pas aux valeurs demandées. Une directive
+          antérieure dans sshd_config ou dans un autre fichier inclus peut
+          être prioritaire.
+        success_msg: La politique SSH demandée est effectivement appliquée.
+      when: not ansible_check_mode
+      tags:
+        - server_bootstrap
+        - ssh
+
+    - name: Mettre à jour le nom d'hôte
+      ansible.builtin.hostname:
+        name: "{{ new_hostname }}"
+      when: manage_hostname
+      tags:
+        - server_bootstrap
+        - hostname
+
+    - name: Ajouter le nom d'hôte dans /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        state: present
+        regexp: '^\s*127\.0\.1\.1(?:\s+.*)?$'
+        line: "{{ server_bootstrap_hosts_hostname_line }}"
+        insertafter: '^127\.0\.0\.1\s+localhost'
+        create: false
+        backup: true
+        # Docker monte /etc/hosts et interdit son remplacement atomique.
+        unsafe_writes: >-
+          {{
+            (ansible_connection | default(''))
+            in ['docker', 'community.docker.docker']
+          }}
+      when: manage_hostname
+      tags:
+        - server_bootstrap
+        - hostname
+
+    - name: Ajouter le contrôleur Ansible dans /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        state: present
+        regexp: '^\s*\S+\s+{{ controller_hostname | regex_escape() }}(?:\s.*)?$'
+        line: "{{ controller_ip }} {{ controller_hostname }}"
+        create: false
+        backup: true
+        # Docker monte /etc/hosts et interdit son remplacement atomique.
+        unsafe_writes: >-
+          {{
+            (ansible_connection | default(''))
+            in ['docker', 'community.docker.docker']
+          }}
+      when:
+        - controller_ip | trim | length > 0
+        - controller_hostname | trim | length > 0
+      tags:
+        - server_bootstrap
+        - hostname
+
+    - name: Ajouter l'hôte distant dans le fichier hosts du contrôleur
+      ansible.builtin.lineinfile:
+        path: "{{ controller_hosts_path }}"
+        state: present
+        regexp: '(?i)^\s*(?!#)\S+\s+{{ new_hostname | regex_escape }}(?:\s.*)?$'
+        line: "{{ controller_hosts_ip }} {{ new_hostname }}"
+        create: false
+        backup: false
+      delegate_to: localhost
+      become: true
+      throttle: 1
+      when: manage_controller_hosts
+      tags:
+        - server_bootstrap
+        - hostname
+
+    - name: Créer les répertoires de configuration Neovim pour l'utilisateur applicatif
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ create_user }}"
+        group: "{{ create_user }}"
+        mode: "0755"
+      loop:
+        - "/home/{{ create_user }}/.config"
+        - "{{ nvim_config_dir }}"
+      when:
+        - create_user is defined
+        - >-
+          not ansible_check_mode
+          or (check_user_exists | default(false))
+      tags:
+        - server_bootstrap
+        - neovim
+
+    - name: Déployer la configuration Neovim pour l'utilisateur applicatif
+      ansible.builtin.template:
+        src: init.vim.j2
+        dest: "{{ nvim_config_path }}"
+        owner: "{{ create_user }}"
+        group: "{{ create_user }}"
+        mode: "0644"
+      when:
+        - create_user is defined
+        - >-
+          not ansible_check_mode
+          or (
+            (check_user_exists | default(false))
+            and (check_user_nvim_dir_exists | default(false))
+          )
+      tags:
+        - server_bootstrap
+        - neovim
+
+    - name: Créer les répertoires de configuration Neovim pour root
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /root/.config
+        - "{{ nvim_config_dir_root }}"
+      when: deploy_root_nvim_config | default(false)
+      tags:
+        - server_bootstrap
+        - neovim
+
+    - name: Déployer la configuration Neovim pour root
+      ansible.builtin.template:
+        src: init.vim.j2
+        dest: "{{ nvim_config_path_root }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when:
+        - deploy_root_nvim_config | default(false)
+        - >-
+          not ansible_check_mode
+          or (check_root_nvim_dir_exists | default(false))
+      tags:
+        - server_bootstrap
+        - neovim

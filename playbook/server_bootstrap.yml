@@ -1,0 +1,36 @@
+---
+- name: Phase 1 - Configuration initiale en root via clé SSH
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: "/root/.ssh/id_rsa"
+    ansible_public_key_file: "/home/ansible/.ssh/ansible.pub"
+    root_public_key_file: "/root/.ssh/id_rsa.pub"
+
+    create_user: ansible
+    manage_hostname: true
+    manage_controller_hosts: false
+    new_hostname: ansiblenode02
+    controller_ip: 10.10.10.201
+    controller_hostname: ansible
+    user_public_keys:
+      - "{{ lookup('ansible.builtin.file', ansible_public_key_file) }}"
+    root_public_key: "{{ lookup('ansible.builtin.file', root_public_key_file) }}"
+    deploy_root_nvim_config: true
+    deploy_root_ssh_key: true
+    ssh_permit_root_login: "prohibit-password"
+    ssh_password_authentication: false
+    ssh_kbd_interactive_authentication: false
+    ssh_manage_allowed_users: false
+    ssh_allowed_users: []
+    admin_group_nopasswd: false
+    admin_group_members: []
+    admin_group_members_authoritative: false
+
+  roles:
+    - role: server_bootstrap
+      tags:
+        - server_bootstrap

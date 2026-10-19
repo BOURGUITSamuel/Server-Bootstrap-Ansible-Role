@@ -1,0 +1,41 @@
+---
+# Valeurs par défaut pouvant être surchargées par l'utilisateur.
+create_user: ansible
+manage_hostname: true
+new_hostname: ""
+controller_ip: ""
+controller_hostname: ""
+manage_controller_hosts: false
+controller_hosts_path: /etc/hosts
+controller_hosts_ip: "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
+user_public_keys: []
+root_public_key: ""
+deploy_root_nvim_config: false
+deploy_root_ssh_key: false
+
+# Politique SSH appliquée par le rôle.
+ssh_permit_root_login: "no"
+ssh_password_authentication: false
+ssh_kbd_interactive_authentication: false
+ssh_manage_allowed_users: false
+ssh_allowed_users: []
+
+# Politique du groupe des administrateurs humains.
+admin_group_nopasswd: false
+admin_group_members: []
+admin_group_members_authoritative: false
+
+sys_packages:
+  - ca-certificates
+  - curl
+  - git
+  - gnupg
+  - iproute2
+  - neovim
+  - python3
+  - python3-apt
+  - rsync
+  - sudo
+  - traceroute
+  - unzip
+  - zip

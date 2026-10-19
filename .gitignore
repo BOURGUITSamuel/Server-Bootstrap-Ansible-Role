@@ -1,0 +1,19 @@
+# Environnements locaux et artefacts de validation.
+.venv/
+venv/
+.ansible/
+.molecule/
+__pycache__/
+*.py[cod]
+*.retry
+*.log
+
+# Inventaire, secrets et clés privées propres au contrôleur.
+/inventory.yml
+/inventory.yaml
+.env
+.vault_pass
+*.pem
+*.key
+id_rsa
+id_ed25519

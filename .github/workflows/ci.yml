@@ -1,0 +1,70 @@
+---
+name: Validation Ansible
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validation:
+    name: Analyse statique et Molecule
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: server_bootstrap
+    env:
+      ANSIBLE_ROLES_PATH: ${{ github.workspace }}
+
+    steps:
+      - name: Récupérer le rôle sous son nom Ansible
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # Version 7.0.1
+        with:
+          path: server_bootstrap
+          persist-credentials: false
+
+      - name: Installer Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # Version 7.0.0
+        with:
+          python-version: "3.13.5"
+
+      - name: Installer les outils de validation
+        run: >-
+          python -m pip install
+          ansible-core==2.20.2
+          ansible-lint==26.8.0
+          molecule==26.8.0
+          'molecule-plugins[docker]==26.7.15'
+
+      - name: Installer les collections Ansible
+        run: ansible-galaxy collection install -r requirements.yml
+
+      - name: Vérifier la disponibilité de Docker
+        run: docker info
+
+      - name: Contrôler les conventions Ansible et YAML
+        run: ansible-lint --offline --profile production .
+
+      - name: Exécuter le scénario Molecule complet
+        run: molecule test --scenario-name default
+        env:
+          # Les deux hôtes couvrent des politiques SSH et sudo différentes.
+          MOLECULE_SSH_PERMIT_ROOT_LOGIN: >-
+            {{ (inventory_hostname == 'debian-trixie') | ternary('prohibit-password', 'no') }}
+          MOLECULE_SSH_PASSWORD_AUTHENTICATION: >-
+            "{{ inventory_hostname == 'debian-trixie' }}"
+          MOLECULE_SSH_KBD_INTERACTIVE_AUTHENTICATION: >-
+            "{{ inventory_hostname == 'debian-trixie' }}"
+          MOLECULE_SSH_MANAGE_ALLOWED_USERS: >-
+            "{{ inventory_hostname == 'debian-trixie' }}"
+          MOLECULE_ADMIN_GROUP_NOPASSWD: >-
+            "{{ inventory_hostname == 'ubuntu-resolute' }}"
+          MOLECULE_ADMIN_GROUP_MEMBERS_AUTHORITATIVE: >-
+            "{{ inventory_hostname == 'debian-trixie' }}"

@@ -1,0 +1,81 @@
+---
+- name: Rechercher les groupes requis existants
+  ansible.builtin.command:
+    argv:
+      - getent
+      - group
+      - "{{ item }}"
+  loop:
+    - "{{ sudo_group }}"
+    - "{{ admin_group }}"
+  register: check_group_status
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+- name: Rechercher l'utilisateur Ansible existant
+  ansible.builtin.command:
+    argv:
+      - getent
+      - passwd
+      - "{{ create_user }}"
+  register: check_user_status
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+- name: Vérifier la présence de sudoers et de visudo
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /etc/sudoers
+    - /usr/sbin/visudo
+  register: check_sudoers_status
+
+- name: Vérifier les répertoires Neovim existants
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ nvim_config_dir }}"
+    - "{{ nvim_config_dir_root }}"
+  register: check_nvim_directories
+
+- name: Rechercher les index de paquets disponibles dans le cache APT
+  ansible.builtin.find:
+    paths: /var/lib/apt/lists
+    patterns: "*_Packages*"
+    file_type: file
+    recurse: false
+    size: 1
+  register: check_apt_indexes
+
+- name: Mémoriser les prérequis réellement disponibles
+  ansible.builtin.set_fact:
+    check_missing_groups: >-
+      {{ check_group_status.results
+         | rejectattr('rc', 'equalto', 0)
+         | map(attribute='item')
+         | list }}
+    check_user_exists: "{{ check_user_status.rc == 0 }}"
+    check_sudoers_ready: >-
+      {{ check_sudoers_status.results[0].stat.exists
+         and check_sudoers_status.results[1].stat.exists
+         and (check_sudoers_status.results[1].stat.executable | default(false)) }}
+    check_user_nvim_dir_exists: >-
+      {{ check_nvim_directories.results[0].stat.exists }}
+    check_root_nvim_dir_exists: >-
+      {{ check_nvim_directories.results[1].stat.exists }}
+    check_apt_cache_ready: "{{ check_apt_indexes.matched | int > 0 }}"
+
+- name: Signaler les limites de la simulation
+  ansible.builtin.debug:
+    msg:
+      - >-
+        Les tâches dépendant d'éléments absents avant le mode check seront
+        ignorées afin de ne pas interrompre la simulation.
+      - "Groupes absents : {{ check_missing_groups | join(', ') | default('aucun', true) }}"
+      - "Utilisateur existant : {{ check_user_exists }}"
+      - "Configuration sudoers vérifiable : {{ check_sudoers_ready }}"
+      - "Cache APT exploitable : {{ check_apt_cache_ready }}"
+      - "Répertoire Neovim utilisateur existant : {{ check_user_nvim_dir_exists }}"
+      - "Répertoire Neovim root existant : {{ check_root_nvim_dir_exists }}"

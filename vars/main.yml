@@ -1,0 +1,23 @@
+---
+# Variables internes au rôle.
+sudo_group: sudo
+admin_group: admin
+sudoers_config_path: /etc/sudoers.d/90-ansible-admin
+ssh_config_path: /etc/ssh/sshd_config
+nvim_config_dir: "/home/{{ create_user }}/.config/nvim"
+nvim_config_path: "{{ nvim_config_dir }}/init.vim"
+nvim_config_dir_root: /root/.config/nvim
+nvim_config_path_root: "{{ nvim_config_dir_root }}/init.vim"
+server_bootstrap_dns_name_pattern: >-
+  ^(?=.{1,253}$)(?:(?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)*(?!-)[A-Za-z0-9-]{1,63}(?<!-)$
+server_bootstrap_ipv4_pattern: >-
+  ^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$
+server_bootstrap_hosts_hostname_line: >-
+  {{
+    '127.0.1.1 ' ~ new_hostname
+    ~ (
+      ' ' ~ new_hostname.split('.')[0]
+      if '.' in new_hostname
+      else ''
+    )
+  }}

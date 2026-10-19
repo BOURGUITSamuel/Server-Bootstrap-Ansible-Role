@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: Technique
+  namespace: jsbourguit
+  role_name: server_bootstrap
+  description: Prépare un hôte Debian ou Ubuntu pour sa gestion à distance avec Ansible.
+  license: Apache-2.0
+  min_ansible_version: "2.20"
+
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+    - name: Ubuntu
+      versions:
+        - resolute
+  galaxy_tags:
+    - bootstrap
+
+dependencies: []

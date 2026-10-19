@@ -1,0 +1,222 @@
+---
+- name: Vérifier que la distribution est prise en charge
+  ansible.builtin.assert:
+    that:
+      - (ansible_facts.os_family | default("")) == "Debian"
+      - >-
+        (
+          (ansible_facts.distribution | default("")) == "Debian"
+          and
+          (ansible_facts.distribution_major_version | default("")) == "13"
+        )
+        or
+        (
+          (ansible_facts.distribution | default("")) == "Ubuntu"
+          and
+          (ansible_facts.distribution_major_version | default("")) == "26"
+          and
+          (ansible_facts.distribution_release | default("")) == "resolute"
+        )
+    quiet: true
+    fail_msg: >-
+      Le rôle prend en charge Debian 13 et Ubuntu 26.04 (resolute) uniquement.
+      Système détecté :
+      {{ ansible_facts.distribution | default('inconnue') }}
+      {{ ansible_facts.distribution_version | default('version inconnue') }}
+      (version majeure
+      {{ ansible_facts.distribution_major_version | default('inconnue') }},
+      nom {{ ansible_facts.distribution_release | default('inconnu') }},
+      famille {{ ansible_facts.os_family | default('inconnue') }}).
+    success_msg: >-
+      Plateforme prise en charge : {{ ansible_facts.distribution }}
+      {{ ansible_facts.distribution_version }}.
+
+- name: Vérifier les options booléennes
+  ansible.builtin.assert:
+    that:
+      - manage_hostname is defined
+      - manage_hostname | type_debug == "bool"
+      - manage_controller_hosts | type_debug == "bool"
+      - deploy_root_nvim_config is not defined or deploy_root_nvim_config | type_debug == "bool"
+      - deploy_root_ssh_key is not defined or deploy_root_ssh_key | type_debug == "bool"
+      - ssh_password_authentication | type_debug == "bool"
+      - ssh_kbd_interactive_authentication | type_debug == "bool"
+      - ssh_manage_allowed_users | type_debug == "bool"
+      - admin_group_nopasswd | type_debug == "bool"
+      - admin_group_members_authoritative | type_debug == "bool"
+    quiet: true
+    fail_msg: >-
+      Les options de gestion du nom d'hôte, du contrôleur, de root, de SSH
+      et du groupe admin doivent être des booléens YAML : true ou false,
+      sans guillemets.
+
+- name: Vérifier le compte technique et les paquets
+  ansible.builtin.assert:
+    that:
+      - create_user is defined
+      - create_user | type_debug == "str"
+      - create_user | trim | length > 0
+      - create_user is match('^[a-z_][a-z0-9_.-]*[$]?$')
+      - sys_packages is defined
+      - sys_packages is iterable
+      - sys_packages | length > 0
+    quiet: true
+    fail_msg: >-
+      create_user doit être un nom de compte Unix valide et sys_packages
+      doit contenir les paquets à installer.
+
+- name: Vérifier les variables du nom d'hôte
+  ansible.builtin.assert:
+    that:
+      - new_hostname is defined
+      - new_hostname | type_debug == "str"
+      - not (manage_hostname or manage_controller_hosts) or new_hostname | trim | length > 0
+    quiet: true
+    fail_msg: >-
+      new_hostname doit être une chaîne non vide lorsque manage_hostname
+      ou manage_controller_hosts est activé.
+
+- name: Vérifier les variables de l'entrée optionnelle du contrôleur
+  ansible.builtin.assert:
+    that:
+      - controller_ip is defined
+      - controller_ip | type_debug == "str"
+      - controller_hostname is defined
+      - controller_hostname | type_debug == "str"
+      - >-
+        (
+          controller_ip | trim | length == 0
+          and controller_hostname | trim | length == 0
+        )
+        or (
+          controller_ip | trim | length > 0
+          and controller_hostname | trim | length > 0
+        )
+    quiet: true
+    fail_msg: >-
+      controller_ip et controller_hostname doivent être des chaînes,
+      toutes deux renseignées ou toutes deux vides.
+
+- name: Vérifier la politique SSH demandée
+  ansible.builtin.assert:
+    that:
+      - ssh_permit_root_login | type_debug == "str"
+      - ssh_permit_root_login in ["no", "prohibit-password", "yes"]
+      - ssh_allowed_users | type_debug == "list"
+      - >-
+        not ssh_manage_allowed_users
+        or ssh_allowed_users | length > 0
+      - >-
+        not ssh_manage_allowed_users
+        or create_user in ssh_allowed_users
+    quiet: true
+    fail_msg: >-
+      ssh_permit_root_login doit valoir no, prohibit-password ou yes.
+      ssh_allowed_users doit être une liste et contenir create_user lorsque
+      ssh_manage_allowed_users est activé.
+
+- name: Vérifier la liste des administrateurs déclarés
+  ansible.builtin.assert:
+    that:
+      - admin_group_members | type_debug == "list"
+      - admin_group_members | length == admin_group_members | unique | length
+    quiet: true
+    fail_msg: "admin_group_members doit être une liste sans doublon."
+
+- name: Vérifier les clés SSH obligatoires
+  ansible.builtin.assert:
+    that:
+      - user_public_keys is defined
+      - user_public_keys | type_debug == "list"
+      - user_public_keys | length > 0
+
+      # clé root (seulement si deploy_root_ssh_key=true)
+      - deploy_root_ssh_key | default(false) | bool == false
+        or (
+        root_public_key is defined
+        and root_public_key | type_debug == "str"
+        and root_public_key | trim | length > 0
+        )
+    quiet: true
+    fail_msg: >-
+      user_public_keys doit être une liste non vide.
+      root_public_key doit être une chaîne non vide lorsque
+      deploy_root_ssh_key est activé.
+
+- name: Vérifier le nom d'hôte demandé
+  ansible.builtin.assert:
+    that:
+      - new_hostname == new_hostname | trim
+      - (new_hostname | trim) is match(server_bootstrap_dns_name_pattern)
+    quiet: true
+    fail_msg: >-
+      new_hostname doit être un nom court ou un FQDN compatible DNS :
+      lettres, chiffres, tirets et points uniquement, avec des étiquettes de
+      1 à 63 caractères ne commençant ni ne finissant par un tiret.
+  when: manage_hostname or manage_controller_hosts
+
+- name: Vérifier l'entrée de l'hôte distant sur le contrôleur
+  ansible.builtin.assert:
+    that:
+      - controller_hosts_ip | type_debug == "str"
+      - controller_hosts_ip == controller_hosts_ip | trim
+      - controller_hosts_ip is match(server_bootstrap_ipv4_pattern)
+      - controller_hosts_path | type_debug == "str"
+      - controller_hosts_path == controller_hosts_path | trim
+      - controller_hosts_path is match('^/.+')
+    quiet: true
+    fail_msg: >-
+      controller_hosts_ip doit être une adresse IPv4 valide de l'hôte distant.
+      Si ansible_host est un nom DNS, renseigner cette adresse explicitement.
+      controller_hosts_path doit être le chemin absolu d'un fichier existant
+      sur le contrôleur Linux.
+  when: manage_controller_hosts
+
+- name: Vérifier l'entrée optionnelle du contrôleur
+  ansible.builtin.assert:
+    that:
+      - controller_ip == controller_ip | trim
+      - controller_hostname == controller_hostname | trim
+      - (controller_ip | trim) is match(server_bootstrap_ipv4_pattern)
+      - (controller_hostname | trim) is match(server_bootstrap_dns_name_pattern)
+    quiet: true
+    fail_msg: >-
+      controller_ip doit être une adresse IPv4 valide et controller_hostname
+      un nom court ou un FQDN compatible DNS.
+  when:
+    - controller_ip | trim | length > 0
+    - controller_hostname | trim | length > 0
+
+- name: Vérifier chaque clé SSH déclarée pour l'utilisateur applicatif
+  ansible.builtin.assert:
+    that:
+      - item | type_debug == "str"
+      - item | trim | length > 0
+    quiet: true
+    fail_msg: "Chaque clé SSH utilisateur doit être une chaîne non vide."
+  loop: "{{ user_public_keys }}"
+  loop_control:
+    index_var: user_key_index
+    label: "clé utilisateur {{ user_key_index + 1 }}"
+
+- name: Vérifier chaque membre déclaré du groupe administrateur
+  ansible.builtin.assert:
+    that:
+      - item | type_debug == "str"
+      - item is match('^[a-z_][a-z0-9_.-]*[$]?$')
+    quiet: true
+    fail_msg: "Chaque membre du groupe administrateur doit être un nom Unix valide."
+  loop: "{{ admin_group_members }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Vérifier chaque utilisateur autorisé par la politique SSH
+  ansible.builtin.assert:
+    that:
+      - item | type_debug == "str"
+      - item is match('^[^\\s#]+$')
+    quiet: true
+    fail_msg: "Chaque entrée SSH autorisée doit être une chaîne sans espace ni commentaire."
+  loop: "{{ ssh_allowed_users }}"
+  loop_control:
+    label: "{{ item }}"

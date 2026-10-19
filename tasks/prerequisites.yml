@@ -1,0 +1,85 @@
+---
+- name: Vérifier la plateforme sans Python avant toute installation
+  ansible.builtin.raw: |
+    set -eu
+    ID=""
+    VERSION_ID=""
+    if test -e /etc/os-release; then
+      . /etc/os-release
+    elif test -e /usr/lib/os-release; then
+      . /usr/lib/os-release
+    else
+      echo "Impossible d'identifier le système : fichier os-release introuvable." >&2
+      exit 1
+    fi
+    case "${ID:-}:${VERSION_ID:-}" in
+      debian:13|ubuntu:26.04)
+        ;;
+      *)
+        echo "Système non pris en charge : ${ID:-inconnu} ${VERSION_ID:-inconnue}. Debian 13 ou Ubuntu 26.04 requis." >&2
+        exit 1
+        ;;
+    esac
+  check_mode: false
+  changed_when: false
+
+- name: Vérifier les prérequis Python sans modifier l'hôte
+  ansible.builtin.raw: |
+    set -eu
+    if test -x /usr/bin/python3 && \
+       /usr/bin/python3 -c 'import apt' >/dev/null 2>&1; then
+      echo "PYTHON_PREREQUISITES_PRESENT"
+    else
+      echo "PYTHON_PREREQUISITES_MISSING"
+    fi
+  register: python_prerequisites_status
+  check_mode: false
+  changed_when: false
+
+- name: Installer les prérequis Python si nécessaires (Debian/Ubuntu)
+  ansible.builtin.raw: |
+    set -eu
+    if ! test -x /usr/bin/python3 || \
+       ! /usr/bin/python3 -c 'import apt' >/dev/null 2>&1; then
+      if ! command -v apt-get >/dev/null 2>&1; then
+        echo "Système non pris en charge : apt-get est introuvable." >&2
+        exit 1
+      fi
+      apt-get update -y
+      DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-apt
+      /usr/bin/python3 -c 'import apt'
+      echo "PYTHON_PREREQUISITES_INSTALLED"
+    fi
+  register: python_prerequisites
+  changed_when: >-
+    'PYTHON_PREREQUISITES_INSTALLED' in python_prerequisites.stdout
+  when:
+    - not ansible_check_mode
+    - >-
+      'PYTHON_PREREQUISITES_MISSING'
+      in python_prerequisites_status.stdout
+
+- name: Signaler l'impossibilité d'une simulation complète sans Python
+  ansible.builtin.debug:
+    msg: >-
+      Python 3 ou python3-apt est absent. Le mode check ne modifie pas
+      l'hôte ; la simulation de cet hôte s'arrête sans erreur avant les
+      modules nécessitant Python.
+  when:
+    - ansible_check_mode
+    - >-
+      'PYTHON_PREREQUISITES_MISSING'
+      in python_prerequisites_status.stdout
+
+- name: Terminer proprement la simulation de l'hôte sans Python
+  ansible.builtin.meta: end_host
+  when:
+    - ansible_check_mode
+    - >-
+      'PYTHON_PREREQUISITES_MISSING'
+      in python_prerequisites_status.stdout
+
+- name: Collecter les informations système
+  ansible.builtin.setup:
+    gather_subset:
+      - min
